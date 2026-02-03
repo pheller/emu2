@@ -35,6 +35,8 @@ Options (should be placed *before* the DOS program name):
 
 - `-r <seg>:<ip>`  Specify a run address to start execution (only for binary loaded data).
 
+- `-s <script>`  Run in script mode (see Script Mode section below).
+
 The available environment variables are:
 - `EMU2_DEBUG_NAME`    Base name of a file to write the debug log, defaults to
                        the exe name if not given.
@@ -284,4 +286,151 @@ And for the IDE, you can use:
     emu2 tp/turbo.exe  -- 'PATH=C:\TP'
 
 ![Image of TP55 environment](doc/tp55.turbo.png)
+
+Script Mode
+-----------
+
+The `-s` flag enables script mode, which allows you to write wrapper scripts
+for DOS programs with modern CLI conveniences. Scripts use a Python-like syntax
+and can intercept file operations to redirect paths.
+
+### Why Script Mode?
+
+Many legacy DOS compilers and tools have rigid expectations about file locations:
+they read source files from the current directory, look for includes in fixed
+paths, and write output files alongside the source. This makes them difficult
+to integrate with modern development practices like out-of-source builds,
+project-specific include paths, or organizing source files in subdirectories.
+
+Script mode solves this by intercepting the DOS program's file operations and
+transparently redirecting them. Your wrapper script can:
+
+- Accept source files from any path and present them to the DOS program as if
+  they were in the current directory
+- Search for include files in multiple directories (like `-I` flags)
+- Redirect output files to a separate build directory (like `-o` flags)
+- Parse the program's output to extract error counts for proper exit codes
+
+The DOS program runs unmodified, believing it's operating on local files in
+the current directory, while the script handles all the path translation.
+
+### Shebang Usage
+
+Scripts can use a shebang to be directly executable:
+
+```bash
+#!/usr/bin/env emu2 -s
+
+name = "mycompiler"
+version = "1.0"
+
+arg("-o", "--output", dest="outdir", default=".")
+arg("source", positional=true)
+opts = parse_args()
+
+@on_read(order=1)
+def source_file(ctx):
+    return abspath(opts.source)
+
+@on_create(match="*.obj")
+def output_file(ctx):
+    return join(opts.outdir, ctx.filename)
+
+exe = which("COMPILER.EXE")
+run(exe, basename(stripext(opts.source)))
+```
+
+### File Interception
+
+Scripts can intercept DOS file operations using decorators:
+
+- `@on_read(order=N)` - Intercept the Nth file read (1-based)
+- `@on_read(match="*.ext")` - Intercept reads matching a glob pattern
+- `@on_write(match="*.ext")` - Intercept file writes
+- `@on_create(match="*.ext")` - Intercept file creation
+
+Handler functions receive a context dict with `filename` and `mode`, and
+return the real Unix path to use (or `null` for default behavior).
+
+### Output Interception
+
+Scripts can intercept console output to capture results:
+
+```bash
+error_count = 0
+
+@on_stdout(regex="([0-9]+) Errors? detected")
+def capture_errors(ctx):
+    global error_count
+    if len(ctx.groups) > 1:
+        error_count = int(ctx.groups[1])
+
+run(exe, args)
+exit(error_count)  # Exit with error count for make compatibility
+```
+
+### Built-in Functions
+
+**Path functions:**
+- `join(a, b)` - Join path components
+- `dirname(path)` - Get directory portion
+- `basename(path)` - Get filename portion
+- `extname(path)` - Get extension (including dot)
+- `stripext(path)` - Remove extension
+- `abspath(path)` - Get absolute path
+
+**File functions:**
+- `exists(path)` - Check if file exists
+- `isdir(path)` - Check if path is a directory
+- `find(name, paths)` - Find file in list of directories
+- `which(name)` - Find executable in PATH
+
+**Argument parsing:**
+- `arg(short, long, dest=name, flag=bool, multi=bool, default=val)` - Define argument
+- `parse_args()` - Parse command line arguments
+
+**I/O functions:**
+- `print(...)` - Print to stdout
+- `eprint(...)` - Print to stderr
+- `die(msg)` - Print error and exit with code 1
+
+**Execution:**
+- `run(exe, args...)` - Run DOS program with hooks, returns exit code
+- `exit(code)` - Exit script with code
+
+### Embedding DOS Executables
+
+For self-contained distribution, you can embed the DOS executable directly in
+the script using base64 encoding. The embedded binary is accessed via the
+special `__embedded__` variable:
+
+```bash
+#!/usr/bin/env emu2 -s
+
+name = "mycompiler"
+arg("source", positional=true)
+opts = parse_args()
+
+@on_read(order=1)
+def source_file(ctx):
+    return abspath(opts.source)
+
+run(__embedded__, basename(stripext(opts.source)))
+
+__END__
+<base64-encoded DOS executable here>
+```
+
+Everything after the `__END__` marker is treated as base64-encoded binary data.
+When `run()` receives `__embedded__`, it decodes the binary to a temporary file
+and executes it.
+
+To create an embedded script, encode your DOS executable:
+
+```bash
+base64 < COMPILER.EXE >> mywrapper
+```
+
+This allows distributing a single script file that contains both the wrapper
+logic and the DOS program it wraps.
 

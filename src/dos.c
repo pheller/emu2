@@ -1,6 +1,7 @@
 #include "dos.h"
 #include "codepage.h"
 #include "dbg.h"
+#include "dos_hooks.h"
 #include "dosnames.h"
 #include "emu.h"
 #include "env.h"
@@ -22,6 +23,14 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+
+// Hook pointers - default to NULL (no hooks)
+dos_open_hook_fn dos_open_hook = NULL;
+void *dos_open_hook_data = NULL;
+dos_exit_hook_fn dos_exit_hook = NULL;
+void *dos_exit_hook_data = NULL;
+dos_output_hook_fn dos_output_hook = NULL;
+void *dos_output_hook_data = NULL;
 
 // NLS data pointers
 static uint32_t nls_uppercase_table;
@@ -186,7 +195,36 @@ static int dos_open_file(int create, int access_mode, int name_addr)
         cpuSetFlag(cpuFlag_CF);
         return 0;
     }
-    char *fname = dos_unix_path(name_addr, create, append_path());
+
+    // Check file open hook if set
+    char *fname = NULL;
+    if(dos_open_hook)
+    {
+        char *dos_name = getstr(name_addr, 63);
+        int hook_mode;
+        if(create == 2)
+            hook_mode = DOS_CREATE_NEW;
+        else if(create)
+            hook_mode = DOS_CREATE;
+        else
+            hook_mode = access_mode & 7;
+
+        fname = dos_open_hook(dos_name, hook_mode, dos_open_hook_data);
+        if(fname == DOS_HOOK_DENY)
+        {
+            debug(debug_dos, "\t(hook denied: %s)\n", dos_name);
+            dos_error = 5;
+            cpuSetAX(5);
+            cpuSetFlag(cpuFlag_CF);
+            return 0;
+        }
+        if(fname)
+            debug(debug_dos, "\t(hook: %s -> %s)\n", dos_name, fname);
+    }
+
+    // Fall back to normal path resolution if hook didn't handle it
+    if(!fname)
+        fname = dos_unix_path(name_addr, create, append_path());
     if(!memory[name_addr] || !fname)
     {
         debug(debug_dos, "\t(file not found)\n");
@@ -662,6 +700,55 @@ static void dos_find_first(void)
     // Check if we want the volume label
     int do_label = (cpuGetCX() & 8) != 0;
     int do_dirs = (cpuGetCX() & 16) != 0;
+
+    // Check file open hook for find_first
+    if(dos_open_hook)
+    {
+        char *dos_name = getstr(cpuGetAddrDS(cpuGetDX()), 63);
+        char *hooked_path = dos_open_hook(dos_name, DOS_FIND_FIRST, dos_open_hook_data);
+
+        if(hooked_path == DOS_HOOK_DENY)
+        {
+            // Hook denied - file not found
+            debug(debug_dos, "\t(find_first hook denied: %s)\n", dos_name);
+            p->find_first_list = NULL;
+            p->find_first_ptr = NULL;
+            dos_find_next(1);
+            return;
+        }
+
+        if(hooked_path)
+        {
+            // Hook provided a path - create single-entry list
+            debug(debug_dos, "\t(find_first hook: %s -> %s)\n", dos_name, hooked_path);
+
+            // Extract just the filename part from dos_name for the DOS name entry
+            char *slash = strrchr(dos_name, '\\');
+            char *fname = slash ? slash + 1 : dos_name;
+
+            // Allocate list with 2 entries (1 file + terminator)
+            struct dos_file_list *list = calloc(2, sizeof(struct dos_file_list));
+
+            // Copy DOS filename (uppercase, max 12 chars + null)
+            for(int i = 0; i < 12 && fname[i]; i++)
+            {
+                char c = fname[i];
+                if(c >= 'a' && c <= 'z')
+                    c = c - 'a' + 'A';
+                list[0].dosname[i] = c;
+            }
+            list[0].unixname = hooked_path;
+
+            // Terminator entry
+            list[1].unixname = NULL;
+
+            p->find_first_list = list;
+            p->find_first_ptr = list;
+            dos_find_next(1);
+            return;
+        }
+    }
+
     p->find_first_list = dos_find_first_file(cpuGetAddrDS(cpuGetDX()), do_label, do_dirs);
 
     p->find_first_ptr = p->find_first_list;
@@ -805,6 +892,19 @@ static void dos_get_drive_info(uint8_t drive)
     cpuClrFlag(cpuFlag_CF);
 }
 
+// Line buffer for output hook
+static char output_line_buf[4096];
+static int output_line_len = 0;
+static int output_line_fd = 1;
+
+static void flush_output_line(void)
+{
+    if (output_line_len > 0 && dos_output_hook) {
+        dos_output_hook(output_line_buf, output_line_len, output_line_fd, dos_output_hook_data);
+    }
+    output_line_len = 0;
+}
+
 // Writes a character to standard output.
 static void dos_putchar(uint8_t ch, int fd)
 {
@@ -917,7 +1017,7 @@ static int run_emulator(char *file, const char *prgname, char *cmdline, char *en
 // DOS exit
 NORETURN void intr20(void)
 {
-    exit(0);
+    dos_program_exit(0);
 }
 
 // Returns a character read from keyboard - note that control keys return two
@@ -1230,7 +1330,7 @@ void intr21(void)
     switch(ah)
     {
     case 0: // TERMINATE PROGRAM
-        exit(0);
+        dos_program_exit(0);
     case 1: // CHARACTER INPUT WITH ECHO
         char_input(1);
         dos_putchar(cpuGetAX() & 0xFF, 1);
@@ -1785,6 +1885,23 @@ void intr21(void)
             cpuSetFlag(cpuFlag_CF);
             break;
         }
+        // Call output hook for stdout/stderr if set
+        if(dos_output_hook && (fd == 1 || fd == 2))
+        {
+            // Buffer lines for the hook
+            for(unsigned i = 0; i < len; i++)
+            {
+                char ch = buf[i];
+                if(output_line_len < (int)sizeof(output_line_buf) - 1)
+                    output_line_buf[output_line_len++] = ch;
+                if(ch == '\n')
+                {
+                    output_line_buf[output_line_len] = '\0';
+                    output_line_fd = fd;
+                    flush_output_line();
+                }
+            }
+        }
         if(devinfo[fd] == 0x80D3)
         {
             for(unsigned i = 0; i < len; i++)
@@ -2132,7 +2249,7 @@ void intr21(void)
         debug(debug_dos, "\texit PSP:'%04x', PARENT:%04x.\n", get_current_PSP(),
               get16(cpuGetAddress(get_current_PSP(), 22)));
         if(0xFFFE == get16(cpuGetAddress(get_current_PSP(), 22)))
-            exit(ax & 0xFF);
+            dos_program_exit(ax & 0xFF);
         else
         {
             // Exit to parent
@@ -2400,7 +2517,15 @@ NORETURN void intr22(void)
 {
     debug(debug_dos, "D-22: TERMINATE HANDLER CALLED\n");
     // If we reached here, we must terminate now
-    exit(return_code & 0xFF);
+    dos_program_exit(return_code & 0xFF);
+}
+
+// Program exit - calls hook if set, otherwise calls exit()
+NORETURN void dos_program_exit(int code)
+{
+    if(dos_exit_hook)
+        dos_exit_hook(code, dos_exit_hook_data);
+    exit(code);
 }
 
 static char *addstr(char *dst, const char *src, int limit)

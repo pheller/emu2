@@ -3,8 +3,10 @@
 
 #include "dbg.h"
 #include "dos.h"
+#include "dos_hooks.h"
 #include "dosnames.h"
 #include "emu.h"
+#include "script.h"
 #include "keyb.h"
 #include "timer.h"
 #include "video.h"
@@ -102,7 +104,7 @@ static void intr25(void)
 NORETURN static void intr19(void)
 {
     debug(debug_int, "INT 19: System reset!\n");
-    exit(0);
+    dos_program_exit(0);
 }
 
 // DOS/BIOS interface
@@ -236,6 +238,7 @@ int main(int argc, char **argv)
         {
         case 'b':
         case 'r':
+        case 's':
         case 'X':
             if(argv[i][2])
                 opt = argv[i] + 2;
@@ -255,6 +258,19 @@ int main(int argc, char **argv)
         case 'v':
             print_version();
             exit(EXIT_SUCCESS);
+        case 's':
+        {
+            // Script mode: run script interpreter
+            // Rebuild argv: [prog_name, script_path, remaining_args...]
+            int script_argc = argc - i + 1;
+            char **script_argv = malloc((script_argc + 1) * sizeof(char *));
+            script_argv[0] = argv[0];  // emu2 program name
+            script_argv[1] = (char *)opt;  // script path
+            for(int k = 2; k < script_argc; k++)
+                script_argv[k] = argv[i + k - 1];
+            script_argv[script_argc] = NULL;
+            return script_main(script_argc, script_argv);
+        }
         case 'b':
             bin_load_addr = strtol(opt, &ep, 0);
             if(*ep || bin_load_addr < 0 || bin_load_addr > 0xFFFF0)
