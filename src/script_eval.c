@@ -1181,6 +1181,71 @@ static script_val *eval_node(script_env *env, script_node *node) {
             return result;
         }
 
+        case NODE_SLICE: {
+            script_val *obj = eval_node(env, node->slice.object);
+            script_val *result = script_val_null();
+            int len = 0;
+
+            // Get length of object
+            if (obj->type == VAL_STRING) {
+                len = obj->string.length;
+            } else if (obj->type == VAL_LIST) {
+                len = obj->list.count;
+            } else {
+                script_val_unref(obj);
+                return result;
+            }
+
+            // Evaluate start and end indices
+            int start = 0;
+            int end = len;
+
+            if (node->slice.start) {
+                script_val *start_val = eval_node(env, node->slice.start);
+                if (start_val->type == VAL_INT) {
+                    start = (int)start_val->integer;
+                    // Handle negative indices
+                    if (start < 0) start = len + start;
+                    if (start < 0) start = 0;
+                    if (start > len) start = len;
+                }
+                script_val_unref(start_val);
+            }
+
+            if (node->slice.end) {
+                script_val *end_val = eval_node(env, node->slice.end);
+                if (end_val->type == VAL_INT) {
+                    end = (int)end_val->integer;
+                    // Handle negative indices
+                    if (end < 0) end = len + end;
+                    if (end < 0) end = 0;
+                    if (end > len) end = len;
+                }
+                script_val_unref(end_val);
+            }
+
+            // Ensure start <= end
+            if (start > end) start = end;
+
+            if (obj->type == VAL_STRING) {
+                int slice_len = end - start;
+                char *buf = malloc(slice_len + 1);
+                memcpy(buf, obj->string.data + start, slice_len);
+                buf[slice_len] = '\0';
+                result = script_val_string(buf);
+                free(buf);
+            } else if (obj->type == VAL_LIST) {
+                result = script_val_list();
+                for (int i = start; i < end; i++) {
+                    script_val_ref(obj->list.items[i]);
+                    script_list_append(result, obj->list.items[i]);
+                }
+            }
+
+            script_val_unref(obj);
+            return result;
+        }
+
         case NODE_ATTR: {
             script_val *obj = eval_node(env, node->attr.object);
             script_val *result = script_val_null();

@@ -127,6 +127,7 @@ typedef enum {
     NODE_UNARY,      // -a, not a
     NODE_CALL,       // func(args)
     NODE_INDEX,      // list[i]
+    NODE_SLICE,      // list[start:end]
     NODE_ATTR,       // obj.attr
 
     // Statements
@@ -199,6 +200,13 @@ struct script_node {
             script_node *object;
             script_node *index;
         } index;
+
+        // NODE_SLICE
+        struct {
+            script_node *object;
+            script_node *start;  // NULL means from beginning
+            script_node *end;    // NULL means to end
+        } slice;
 
         // NODE_ATTR
         struct {

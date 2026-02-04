@@ -58,6 +58,11 @@ void script_node_free(script_node *node) {
             script_node_free(node->index.object);
             script_node_free(node->index.index);
             break;
+        case NODE_SLICE:
+            script_node_free(node->slice.object);
+            if (node->slice.start) script_node_free(node->slice.start);
+            if (node->slice.end) script_node_free(node->slice.end);
+            break;
         case NODE_ATTR:
             script_node_free(node->attr.object);
             free(node->attr.attr);
@@ -314,12 +319,42 @@ static script_node *parse_postfix(script_parser *p) {
             expect(p, TOK_RPAREN, "Expected ')' after arguments");
             expr = call;
         } else if (match_token(p, TOK_LBRACKET)) {
-            // Index
-            script_node *idx = node_new(NODE_INDEX, p->previous.line);
-            idx->index.object = expr;
-            idx->index.index = parse_expression(p);
-            expect(p, TOK_RBRACKET, "Expected ']' after index");
-            expr = idx;
+            // Index or slice
+            int line = p->previous.line;
+            script_node *start = NULL;
+            script_node *end = NULL;
+            bool is_slice = false;
+
+            // Check for [:...] (start is omitted)
+            if (check(p, TOK_COLON)) {
+                is_slice = true;
+            } else if (!check(p, TOK_RBRACKET)) {
+                start = parse_expression(p);
+            }
+
+            // Check for slice syntax [start:end] or [start:]
+            if (match_token(p, TOK_COLON)) {
+                is_slice = true;
+                // Check for end expression (optional)
+                if (!check(p, TOK_RBRACKET)) {
+                    end = parse_expression(p);
+                }
+            }
+
+            expect(p, TOK_RBRACKET, "Expected ']' after index/slice");
+
+            if (is_slice) {
+                script_node *slice = node_new(NODE_SLICE, line);
+                slice->slice.object = expr;
+                slice->slice.start = start;
+                slice->slice.end = end;
+                expr = slice;
+            } else {
+                script_node *idx = node_new(NODE_INDEX, line);
+                idx->index.object = expr;
+                idx->index.index = start;
+                expr = idx;
+            }
         } else if (match_token(p, TOK_DOT)) {
             // Attribute access
             expect(p, TOK_IDENT, "Expected attribute name after '.'");

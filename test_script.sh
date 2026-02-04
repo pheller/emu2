@@ -271,6 +271,30 @@ else
 fi
 
 #############################################
+# Test 13: String slicing
+#############################################
+cat > "$TMPDIR/test13.sh" << 'EOF'
+#!/usr/bin/env emu2 -s
+s = "hello world"
+print(s[0:5])
+print(s[6:])
+print(s[:5])
+print(s[-5:])
+exit(0)
+EOF
+
+OUTPUT=$($EMU2 -s "$TMPDIR/test13.sh" 2>&1)
+EXPECTED="hello
+world
+hello
+world"
+if [ "$OUTPUT" = "$EXPECTED" ]; then
+    pass "String slicing"
+else
+    fail "String slicing (got: $OUTPUT)"
+fi
+
+#############################################
 # Summary
 #############################################
 echo ""
