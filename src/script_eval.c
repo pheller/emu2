@@ -24,6 +24,8 @@
 #include <libgen.h>
 #include <fnmatch.h>
 #include <regex.h>
+#include <ctype.h>
+
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -1558,8 +1560,16 @@ static bool match_rule(script_val *rule, const char *filename, int order) {
             return order == atoi(spec);
         }
     } else if (strcmp(rule->rule.match_type, "match") == 0) {
-        // Use FNM_CASEFOLD for case-insensitive matching (DOS filenames are uppercase)
-        return fnmatch(rule->rule.match_value, filename, FNM_CASEFOLD) == 0;
+        // Case-insensitive matching for DOS filenames
+        // Convert both to uppercase for consistent behavior across platforms
+        char *upper_pattern = strdup(rule->rule.match_value);
+        char *upper_filename = strdup(filename);
+        for (char *p = upper_pattern; *p; p++) *p = toupper((unsigned char)*p);
+        for (char *p = upper_filename; *p; p++) *p = toupper((unsigned char)*p);
+        int result = fnmatch(upper_pattern, upper_filename, 0) == 0;
+        free(upper_pattern);
+        free(upper_filename);
+        return result;
     } else if (strcmp(rule->rule.match_type, "regex") == 0) {
         regex_t re;
         if (regcomp(&re, rule->rule.match_value, REG_EXTENDED | REG_NOSUB) != 0)
@@ -1988,8 +1998,13 @@ static script_val *builtin_run(script_env *env, script_val **args, int argc) {
             fprintf(stderr, "Failed to create temp file for embedded binary\n");
             exit(1);
         }
-        write(fd, args[0]->bytes.data, args[0]->bytes.length);
+        ssize_t written = write(fd, args[0]->bytes.data, args[0]->bytes.length);
         close(fd);
+        if (written != (ssize_t)args[0]->bytes.length) {
+            fprintf(stderr, "Failed to write embedded binary to temp file\n");
+            unlink(template);
+            exit(1);
+        }
         exe_path = strdup(template);
         temp_file = true;
     } else {
@@ -2179,8 +2194,8 @@ static char *read_file(const char *path) {
     fseek(f, 0, SEEK_SET);
 
     char *buf = malloc(size + 1);
-    fread(buf, 1, size, f);
-    buf[size] = '\0';
+    size_t nread = fread(buf, 1, size, f);
+    buf[nread] = '\0';
     fclose(f);
     return buf;
 }
